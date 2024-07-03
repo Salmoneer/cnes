@@ -1,0 +1,7 @@
+build/
+
+roms/
+
+.cache/
+comile_flags.txt
+compile_commands.json
