@@ -99,18 +99,13 @@ void print_header() {
     }
     printf(" 0x%02X\n", cartridge.header.nes[3]);
 
-    printf("PRG ROM size: 16KiB * %d\n", cartridge.header.prg_size);
-    printf("CHR ROM size:  8KiB * %d\n", cartridge.header.chr_size);
+    printf("PRG ROM size: %d * 16KiB\n", cartridge.header.prg_size);
+    printf("CHR ROM size: %d *  8KiB\n", cartridge.header.chr_size);
 
     printf("Flags (6): 0x%02X\n", cartridge.header.flags_6);
     printf("Flags (7): 0x%02X\n", cartridge.header.flags_7);
 
-    printf("Padding:");
-    for (int i = 0; i < 8; i++) {
-        printf(" 0x%02X", cartridge.header.padding[i]);
-    }
-
-    printf("\n");
+    printf("Mapper: %02X\n", cartridge.mapper);
 }
 
 
