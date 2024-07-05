@@ -52,6 +52,15 @@ struct {
 } nes = { 0 };
 
 
+struct {
+    uint8_t *data;
+} state = { 0 };
+
+void cleanup() {
+    if (state.data != NULL) free(state.data);
+}
+
+
 #define eprintf(format, ...) fprintf(stderr, format, ##__VA_ARGS__)
 
 
@@ -69,22 +78,22 @@ uint8_t *read_file(const char *filename) {
     return buffer;
 }
 
-void load_cartridge(uint8_t *data) {
-    if ((data[7] & 0x0c) == 0x08) {
+void load_cartridge() {
+    if ((state.data[7] & 0x0c) == 0x08) {
         printf("iNES 2.0 is not supported.\n");
         exit(EXIT_FAILURE);
     }
 
-    memcpy(cartridge.header.nes, data, 4);
-    cartridge.header.prg_size = data[4];
-    cartridge.header.chr_size = data[5];
-    cartridge.header.flags_6 = data[6];
-    cartridge.header.flags_7 = data[7];
-    memcpy(cartridge.header.padding, data + 8, 8);
+    memcpy(cartridge.header.nes, state.data, 4);
+    cartridge.header.prg_size = state.data[4];
+    cartridge.header.chr_size = state.data[5];
+    cartridge.header.flags_6 = state.data[6];
+    cartridge.header.flags_7 = state.data[7];
+    memcpy(cartridge.header.padding, state.data + 8, 8);
 
     bool trainer = cartridge.header.flags_6 & (1 << 3);
 
-    cartridge.prg_rom = data + 16 + (trainer ? 512 : 0);
+    cartridge.prg_rom = state.data + 16 + (trainer ? 512 : 0);
     cartridge.chr_rom = cartridge.prg_rom + cartridge.header.prg_size;
 
     cartridge.mapper = (cartridge.header.flags_7 & 0xf0) | (cartridge.header.flags_6 >> 4);
@@ -867,6 +876,8 @@ void run() {
 }
 
 int main(int argc, char **argv) {
+    atexit(cleanup);
+
     if (argc < 2) {
         printf("Please provide a file\n");
         exit(EXIT_FAILURE);
@@ -876,18 +887,18 @@ int main(int argc, char **argv) {
         DEBUG = true;
     }
 
-    uint8_t *data = read_file(argv[1]);
+    state.data = read_file(argv[1]);
 
-    if (data == NULL) {
+    if (state.data == NULL) {
         printf("Please provide a valid file\n");
         exit(EXIT_FAILURE);
     }
 
-    load_cartridge(data);
+    load_cartridge();
     print_header();
 
     if (argc > 2 && strcmp(argv[2], "--read-header") == 0) {
-        goto cleanup;
+        exit(EXIT_SUCCESS);
     }
 
     uint8_t ram[2048] = { 0 };
@@ -896,8 +907,4 @@ int main(int argc, char **argv) {
 
     poweron();
     run();
-
-cleanup:
-    free(data);
-    return 0;
 }
