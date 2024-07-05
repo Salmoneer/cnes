@@ -105,7 +105,7 @@ void print_header() {
     printf("Flags (6): 0x%02X\n", cartridge.header.flags_6);
     printf("Flags (7): 0x%02X\n", cartridge.header.flags_7);
 
-    printf("Mapper: %02X\n", cartridge.mapper);
+    printf("Mapper: 0x%02X\n", cartridge.mapper);
 }
 
 
