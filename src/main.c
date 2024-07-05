@@ -6,6 +6,7 @@
 #include <string.h>
 #include "instructions.h"
 
+
 const uint16_t NMI_VECTOR = 0xfffa;
 const uint16_t RESET_VECTOR = 0xfffc;
 const uint16_t IRQ_VECTOR = 0xfffe;
@@ -20,6 +21,10 @@ enum flag {
     OVERFLOW  = 6,
     NEGATIVE  = 7,
 };
+
+
+bool DEBUG = false;
+
 
 struct {
     struct {
@@ -47,6 +52,9 @@ struct {
 } nes = { 0 };
 
 
+#define eprintf(format, ...) fprintf(stderr, format, ##__VA_ARGS__)
+
+
 uint8_t *read_file(const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (f == NULL) return NULL;
@@ -63,11 +71,16 @@ uint8_t *read_file(const char *filename) {
 
 void load_cartridge(uint8_t *data) {
     if ((data[7] & 0x0c) == 0x08) {
-        printf("iNES 2.0 is unsupported.\n");
+        printf("iNES 2.0 is not supported.\n");
         exit(EXIT_FAILURE);
     }
 
-    memcpy(&cartridge.header, data, 16);
+    memcpy(cartridge.header.nes, data, 4);
+    cartridge.header.prg_size = data[4];
+    cartridge.header.chr_size = data[5];
+    cartridge.header.flags_6 = data[6];
+    cartridge.header.flags_7 = data[7];
+    memcpy(cartridge.header.padding, data + 8, 8);
 
     bool trainer = cartridge.header.flags_6 & (1 << 3);
 
@@ -78,21 +91,23 @@ void load_cartridge(uint8_t *data) {
 }
 
 void print_header() {
+    if (DEBUG) return;
+
     printf("Magic: ");
     for (int i = 0; i < 3; i++) {
         printf("%c", cartridge.header.nes[i]);
     }
-    printf(" 0x%02x\n", cartridge.header.nes[3]);
+    printf(" 0x%02X\n", cartridge.header.nes[3]);
 
     printf("PRG ROM size: 16KiB * %d\n", cartridge.header.prg_size);
     printf("CHR ROM size:  8KiB * %d\n", cartridge.header.chr_size);
 
-    printf("Flags (6): 0x%02x\n", cartridge.header.flags_6);
-    printf("Flags (7): 0x%02x\n", cartridge.header.flags_7);
+    printf("Flags (6): 0x%02X\n", cartridge.header.flags_6);
+    printf("Flags (7): 0x%02X\n", cartridge.header.flags_7);
 
     printf("Padding:");
     for (int i = 0; i < 8; i++) {
-        printf(" 0x%02x", cartridge.header.padding[i]);
+        printf(" 0x%02X", cartridge.header.padding[i]);
     }
 
     printf("\n");
@@ -103,10 +118,10 @@ uint8_t cpu_read_8(uint16_t address) {
     if (address < 0x2000) {
         return nes.ram[address & 0x07ff];
     } else if (address >= 0x8000) {
-        return cartridge.prg_rom[address - 0x8000];
+        return cartridge.prg_rom[(address - 0x8000) & (cartridge.header.prg_size == 1 ? 0x3fff : 0xffff)];
     }
 
-    printf("WARNING: Read from unmapped address: %04x\n", address);
+    eprintf("WARNING: Read from unmapped address: %04x\n", address);
     return 0;
 }
 
@@ -120,7 +135,7 @@ void cpu_write_8(uint16_t address, uint8_t data) {
     } else if (address >= 0x8000) {
         cartridge.prg_rom[address - 0x8000] = data;
     } else {
-        printf("WARNING: Write to unmapped address: %04x with data: %02x\n", address, data);
+        eprintf("WARNING: Write to unmapped address: %04x with data: %02X\n", address, data);
     }
 }
 
@@ -138,7 +153,7 @@ void set_flag(enum flag f, bool set) {
 }
 
 uint8_t get_flag(enum flag f) {
-    if (nes.cpu.p & f) {
+    if (nes.cpu.p & (1 << f)) {
         return 1;
     } else {
         return 0;
@@ -146,7 +161,7 @@ uint8_t get_flag(enum flag f) {
 }
 
 void stack_push_8(uint8_t data) {
-    nes.ram[0x100 + nes.cpu.s--] = data;
+    nes.ram[0x0100 + nes.cpu.s--] = data;
 }
 
 void stack_push_16(uint16_t data) {
@@ -155,7 +170,7 @@ void stack_push_16(uint16_t data) {
 }
 
 uint8_t stack_pop_8() {
-    return nes.ram[0x100 + ++nes.cpu.s];
+    return nes.ram[0x0100 + ++nes.cpu.s];
 }
 
 uint16_t stack_pop_16() {
@@ -182,7 +197,7 @@ uint16_t instruction_length(enum address_mode mode) {
         case ABSOLUTE_Y:
             return 3;
         default:
-            printf("ERROR: Unable to find length of instruction with unknown addressing mode with id: %d\nHalting execution\n", mode);
+            eprintf("ERROR: Unable to find length of instruction with unknown addressing mode with id: %d\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
 }
@@ -203,7 +218,7 @@ uint16_t read_operand(enum address_mode mode) {
         case ABSOLUTE:
             return operand_16;
         case INDIRECT:
-            return cpu_read_16(operand_16);
+            return cpu_read_8(operand_16) + 256 * cpu_read_8((operand_16 & 0xff00) | (((operand_16 & 0xff) + 1) % 256));
         case ZERO_PAGE_X:
             return (operand_8 + nes.cpu.x) % 256;
         case ZERO_PAGE_Y:
@@ -213,13 +228,97 @@ uint16_t read_operand(enum address_mode mode) {
         case ABSOLUTE_Y:
             return operand_16 + nes.cpu.y;
         case INDEXED_INDIRECT:
-            return cpu_read_16((operand_8 + nes.cpu.x) % 256) + 256 * cpu_read_16((operand_8 + nes.cpu.x + 1) % 256);
+            return cpu_read_8((operand_8 + nes.cpu.x) % 256) + 256 * cpu_read_8((operand_8 + nes.cpu.x + 1) % 256);
         case INDIRECT_INDEXED:
             return cpu_read_8(operand_8) + 256 * cpu_read_8((operand_8 + 1) % 256) + nes.cpu.y;
         default:
-            printf("ERROR: Unknown addressing mode with id: %d\nHalting execution\n", mode);
+            eprintf("ERROR: Unknown addressing mode with id: %d\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
+}
+
+void print_next_execution() {
+    uint8_t opcode = cpu_read_8(nes.cpu.pc);
+
+    enum instruction_name name = INSTRUCTION_LOOKUP[opcode];
+    enum address_mode mode = ADDRESS_MODE_LOOKUP[opcode];
+
+    uint16_t address = read_operand(mode);
+
+    printf("%04X ", nes.cpu.pc);
+    int indent = 5;
+    for (int i = 0; i < instruction_length(mode); i++) {
+        printf(" %02X", cpu_read_8(nes.cpu.pc + i));
+        indent += 3;
+    }
+    printf("%*c", 16 - indent, ' ');
+    indent = 16;
+    printf("%s ", INSTRUCTION_NAME_STRING[name]);
+
+    indent = 0;
+    switch (mode) {
+        case IMMEDIATE:
+            printf("#$%02X%n", cpu_read_8(address), &indent);
+            break;
+        case ACCUMULATOR:
+            printf("A");
+            indent = 1;
+            break;
+        case RELATIVE:
+            printf("$%04X%n", nes.cpu.pc + cpu_read_8(address) + 2, &indent);
+            break;
+        case ZERO_PAGE:
+            printf("$%02X%n", address, &indent);
+            break;
+        case ABSOLUTE:
+            printf("$%04X%n", address, &indent);
+            break;
+        case INDIRECT:
+            printf("($%04X) = %04X%n", cpu_read_16(nes.cpu.pc + 1), address, &indent);
+            break;
+        case ZERO_PAGE_X:
+            printf("$%02X,X @ %02X%n", cpu_read_8(nes.cpu.pc + 1), address, &indent);
+            break;
+        case ZERO_PAGE_Y:
+            printf("$%02X,Y @ %02X%n", cpu_read_8(nes.cpu.pc + 1), address, &indent);
+            break;
+        case ABSOLUTE_X:
+            printf("$%04X,X @ %04X%n", cpu_read_16(nes.cpu.pc + 1), address, &indent);
+            break;
+        case ABSOLUTE_Y:
+            printf("$%04X,Y @ %04X%n", cpu_read_16(nes.cpu.pc + 1), address, &indent);
+            break;
+        case INDEXED_INDIRECT:
+            printf("($%02X,X) @ %02X = %04X%n", cpu_read_8(nes.cpu.pc + 1), (uint8_t)(cpu_read_8(nes.cpu.pc + 1) + nes.cpu.x), address, &indent);
+            break;
+        case INDIRECT_INDEXED:
+            printf("($%02X),Y = %04X @ %04X%n", cpu_read_8(nes.cpu.pc + 1), cpu_read_8(cpu_read_8(nes.cpu.pc + 1)) + 256 * cpu_read_8((cpu_read_8(nes.cpu.pc + 1) + 1) % 256), address, &indent);
+            break;
+
+        case IMPLICIT:
+        default:
+            break;
+    }
+
+    if (mode != IMMEDIATE && mode != ACCUMULATOR) {
+        int store_add = 0;
+        if (name == STA || name == STX || name == STY ||
+                name == LDA || name == LDX || name == LDY ||
+                name == ORA || name == EOR || name == AND ||
+                name == ADC || name == SBC || name == BIT ||
+                name == CMP || name == CPX || name == CPY ||
+                name == LSR || name == ROR ||
+                name == ASL || name == ROL ||
+                name == INC || name == DEC
+           ) {
+            printf(" = %02X%n", cpu_read_8(address), &store_add);
+        }
+        indent += store_add;
+    }
+
+    printf("%*cA:%02X X:%02X Y:%02X P:%02X SP:%02X", 28 - indent, ' ', nes.cpu.a, nes.cpu.x, nes.cpu.y, nes.cpu.p, nes.cpu.s);
+
+    printf("\n");
 }
 
 
@@ -253,8 +352,8 @@ void _asl(enum address_mode mode, uint16_t address) {
         result = cpu_read_8(address) << 1;
     }
 
-    set_flag(CARRY, result & 0x100);
-    set_flag(ZERO, result == 0);
+    set_flag(CARRY, result & 0x0100);
+    set_flag(ZERO, (result & 0xff) == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     if (mode == ACCUMULATOR) {
@@ -266,45 +365,47 @@ void _asl(enum address_mode mode, uint16_t address) {
 
 void _bcc(enum address_mode mode, uint16_t address) {
     if (!get_flag(CARRY)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _bcs(enum address_mode mode, uint16_t address) {
     if (get_flag(CARRY)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _beq(enum address_mode mode, uint16_t address) {
     if (get_flag(ZERO)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _bit(enum address_mode mode, uint16_t address) {
-    uint8_t result = nes.cpu.a & cpu_read_8(address);
+    uint8_t data = cpu_read_8(address);
+    uint8_t result = nes.cpu.a & data;
 
     set_flag(ZERO, result == 0);
-    set_flag(OVERFLOW, result & 0x40);
-    set_flag(NEGATIVE, result & 0x80);
+
+    set_flag(OVERFLOW, data & 0x40);
+    set_flag(NEGATIVE, data & 0x80);
 }
 
 void _bmi(enum address_mode mode, uint16_t address) {
     if (get_flag(NEGATIVE)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _bne(enum address_mode mode, uint16_t address) {
     if (!get_flag(ZERO)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _bpl(enum address_mode mode, uint16_t address) {
     if (!get_flag(NEGATIVE)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
@@ -317,13 +418,13 @@ void _brk(enum address_mode mode, uint16_t address) {
 
 void _bvc(enum address_mode mode, uint16_t address) {
     if (!get_flag(OVERFLOW)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
 void _bvs(enum address_mode mode, uint16_t address) {
     if (get_flag(OVERFLOW)) {
-        nes.cpu.pc += cpu_read_8(address);
+        nes.cpu.pc += cpu_read_8(address) + 2;
     }
 }
 
@@ -344,25 +445,28 @@ void _clv(enum address_mode mode, uint16_t address) {
 }
 
 void _cmp(enum address_mode mode, uint16_t address) {
-    uint8_t result = nes.cpu.a - cpu_read_8(address);
+    uint8_t data = cpu_read_8(address);
+    uint8_t result = nes.cpu.a - data;
 
-    set_flag(CARRY, result >= 0);
+    set_flag(CARRY, nes.cpu.a >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 }
 
 void _cpx(enum address_mode mode, uint16_t address) {
-    uint8_t result = nes.cpu.x - cpu_read_8(address);
+    uint8_t data = cpu_read_8(address);
+    uint8_t result = nes.cpu.x - data;
 
-    set_flag(CARRY, result >= 0);
+    set_flag(CARRY, nes.cpu.x >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 }
 
 void _cpy(enum address_mode mode, uint16_t address) {
-    uint8_t result = nes.cpu.y - cpu_read_8(address);
+    uint8_t data = cpu_read_8(address);
+    uint8_t result = nes.cpu.y - data;
 
-    set_flag(CARRY, result >= 0);
+    set_flag(CARRY, nes.cpu.y >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 }
@@ -427,7 +531,7 @@ void _iny(enum address_mode mode, uint16_t address) {
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
-    nes.cpu.x = result;
+    nes.cpu.y = result;
 }
 
 void _jmp(enum address_mode mode, uint16_t address) {
@@ -436,7 +540,7 @@ void _jmp(enum address_mode mode, uint16_t address) {
 }
 
 void _jsr(enum address_mode mode, uint16_t address) {
-    stack_push_16(instruction_length(mode) - 1);
+    stack_push_16(nes.cpu.pc + instruction_length(mode) - 1);
     nes.cpu.pc = address;
 }
 
@@ -504,7 +608,7 @@ void _pha(enum address_mode mode, uint16_t address) {
 }
 
 void _php(enum address_mode mode, uint16_t address) {
-    stack_push_8(nes.cpu.p);
+    stack_push_8(nes.cpu.p | (1 << BREAK));
 }
 
 void _pla(enum address_mode mode, uint16_t address) {
@@ -517,12 +621,12 @@ void _pla(enum address_mode mode, uint16_t address) {
 }
 
 void _plp(enum address_mode mode, uint16_t address) {
+    uint8_t initial_flags = nes.cpu.p;
     uint8_t result = stack_pop_8();
 
-    set_flag(ZERO, result == 0);
-    set_flag(NEGATIVE, result & 0x80);
-
     nes.cpu.p = result;
+    set_flag(ONE, true);
+    set_flag(BREAK, initial_flags & (1 << BREAK));
 }
 
 void _rol(enum address_mode mode, uint16_t address) {
@@ -554,7 +658,7 @@ void _ror(enum address_mode mode, uint16_t address) {
         data = cpu_read_8(address);
     }
 
-    uint8_t result = data >> 1 | get_flag(CARRY);
+    uint8_t result = data >> 1 | (get_flag(CARRY) << 7);
 
     set_flag(CARRY, data & 1);
     set_flag(ZERO, result == 0);
@@ -569,6 +673,7 @@ void _ror(enum address_mode mode, uint16_t address) {
 
 void _rti(enum address_mode mode, uint16_t address) {
     nes.cpu.p = stack_pop_8();
+    set_flag(ONE, true);
     nes.cpu.pc = stack_pop_16();
 }
 
@@ -650,12 +755,7 @@ void _txa(enum address_mode mode, uint16_t address) {
 }
 
 void _txs(enum address_mode mode, uint16_t address) {
-    uint8_t result = nes.cpu.x;
-
-    set_flag(ZERO, result == 0);
-    set_flag(NEGATIVE, result & 0x80);
-
-    nes.cpu.s = result;
+    nes.cpu.s = nes.cpu.x;
 }
 
 void _tya(enum address_mode mode, uint16_t address) {
@@ -678,12 +778,9 @@ int execute_next() {
 
     uint16_t address = read_operand(mode);
 
-    printf("%04x: %s mode %s (", nes.cpu.pc, INSTRUCTION_NAME_STRING[name], ADDRESS_MODE_STRING[mode]);
-    for (int i = 0; i < instruction_length(mode); i++) {
-        if (i != 0) printf(" ");
-        printf("%02x", cpu_read_8(nes.cpu.pc + i));
+    if (DEBUG) {
+        print_next_execution();
     }
-    printf(")\n");
 
     switch (name) {
         case ADC: _adc(mode, address); break;
@@ -743,7 +840,7 @@ int execute_next() {
         case TXS: _txs(mode, address); break;
         case TYA: _tya(mode, address); break;
         default:
-            printf("ERROR: Unknown instruction with opcode: 0x%02x\nHalting execution\n", opcode);
+            eprintf("ERROR: Unknown instruction with opcode: 0x%02X\nHalting execution\n", opcode);
             break;
     }
 
@@ -757,13 +854,15 @@ int execute_next() {
 
 void poweron() {
     nes.cpu.pc = cpu_read_16(RESET_VECTOR);
-    printf("----- POWER ON -----\n");
-    printf("Starting execution at 0x%04x\n", nes.cpu.pc);
+    if (DEBUG) nes.cpu.pc = 0xc000; // nestest.nes
+    nes.cpu.s = 0xfd;
+    set_flag(INTERRUPT, true);
+    set_flag(ONE, true);
 }
 
 void run() {
     int cycles = 0;
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; 1; i++) {
         if (cycles == 0) {
             cycles += execute_next();
         } else {
@@ -773,9 +872,13 @@ void run() {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    if (argc < 2) {
         printf("Please provide a file\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (argc > 2 && strcmp(argv[2], "--debug") == 0) {
+        DEBUG = true;
     }
 
     uint8_t *data = read_file(argv[1]);
@@ -786,6 +889,11 @@ int main(int argc, char **argv) {
     }
 
     load_cartridge(data);
+    print_header();
+
+    if (argc > 2 && strcmp(argv[2], "--read-header") == 0) {
+        goto cleanup;
+    }
 
     uint8_t ram[2048] = { 0 };
 
@@ -794,5 +902,7 @@ int main(int argc, char **argv) {
     poweron();
     run();
 
+cleanup:
     free(data);
+    return 0;
 }
