@@ -23,9 +23,6 @@ enum flag {
 };
 
 
-bool DEBUG = false;
-
-
 struct {
     struct {
         char nes[4];
@@ -53,6 +50,8 @@ struct {
 
 
 struct {
+    bool debug;
+
     uint8_t *data;
 
     uint64_t cycles;
@@ -103,7 +102,7 @@ void load_cartridge() {
 }
 
 void print_header() {
-    if (DEBUG) return;
+    if (state.debug) return;
 
     printf("Magic: ");
     for (int i = 0; i < 3; i++) {
@@ -1021,7 +1020,7 @@ int execute_next() {
 
     uint16_t address = read_operand(mode);
 
-    if (DEBUG) {
+    if (state.debug) {
         print_next_instruction();
     }
 
@@ -1097,7 +1096,7 @@ int execute_next() {
 
 void poweron() {
     nes.cpu.pc = cpu_read_16(RESET_VECTOR);
-    if (DEBUG) nes.cpu.pc = 0xc000; // nestest.nes
+    if (state.debug) nes.cpu.pc = 0xc000; // nestest.nes
     state.cycles = 7;
     nes.cpu.s = 0xfd;
     set_flag(INTERRUPT, true);
@@ -1124,7 +1123,7 @@ int main(int argc, char **argv) {
     }
 
     if (argc > 2 && strcmp(argv[2], "--debug") == 0) {
-        DEBUG = true;
+        state.debug = true;
     }
 
     state.data = read_file(argv[1]);
