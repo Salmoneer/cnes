@@ -54,6 +54,9 @@ struct {
 
 struct {
     uint8_t *data;
+
+    uint64_t cycles;
+    uint64_t cycles_queue;
 } state = { 0 };
 
 void cleanup() {
@@ -130,7 +133,7 @@ uint8_t cpu_read_8(uint16_t address) {
 }
 
 uint16_t cpu_read_16(uint16_t address) {
-    return (cpu_read_8(address + 1) << 8) | cpu_read_8(address);
+    return cpu_read_8(address) | (cpu_read_8(address + 1) << 8);
 }
 
 void cpu_write_8(uint16_t address, uint8_t data) {
@@ -241,7 +244,20 @@ uint16_t read_operand(enum address_mode mode) {
     }
 }
 
-void print_next_execution() {
+bool page_cross(enum address_mode mode) {
+    switch (mode) {
+        case ABSOLUTE_X:
+            return (cpu_read_16(nes.cpu.pc + 1) & 0xff) + nes.cpu.x > 0xff;
+        case ABSOLUTE_Y:
+            return (cpu_read_16(nes.cpu.pc + 1) & 0xff) + nes.cpu.y > 0xff;
+        case INDIRECT_INDEXED:
+            return ((cpu_read_16(cpu_read_8(nes.cpu.pc + 1)) & 0xff) + nes.cpu.y) > 0xff;
+        default:
+            return 0;
+    }
+}
+
+void print_next_instruction() {
     uint8_t opcode = cpu_read_8(nes.cpu.pc);
 
     enum instruction_name name = INSTRUCTION_LOOKUP[opcode];
@@ -320,13 +336,11 @@ void print_next_execution() {
         indent += store_add;
     }
 
-    printf("%*cA:%02X X:%02X Y:%02X P:%02X SP:%02X", 28 - indent, ' ', nes.cpu.a, nes.cpu.x, nes.cpu.y, nes.cpu.p, nes.cpu.s);
-
-    printf("\n");
+    printf("%*cA:%02X X:%02X Y:%02X P:%02X SP:%02X CYC:%ld\n", 28 - indent, ' ', nes.cpu.a, nes.cpu.x, nes.cpu.y, nes.cpu.p, nes.cpu.s, state.cycles);
 }
 
 
-void _adc(enum address_mode mode, uint16_t address) {
+uint8_t _adc(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
 
     int result = nes.cpu.a + data + get_flag(CARRY);
@@ -337,18 +351,22 @@ void _adc(enum address_mode mode, uint16_t address) {
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _and(enum address_mode mode, uint16_t address) {
+uint8_t _and(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.a & cpu_read_8(address);
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _asl(enum address_mode mode, uint16_t address) {
+uint8_t _asl(enum address_mode mode, uint16_t address) {
     int result;
     if (mode == ACCUMULATOR) {
         result = nes.cpu.a << 1;
@@ -365,27 +383,65 @@ void _asl(enum address_mode mode, uint16_t address) {
     } else {
         cpu_write_8(address, result);
     }
+
+    if (mode == ACCUMULATOR) {
+        return 0;
+    } else if (mode == ABSOLUTE_X) {
+        return 3;
+    } else {
+        return 2;
+    }
 }
 
-void _bcc(enum address_mode mode, uint16_t address) {
+uint8_t _bcc(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (!get_flag(CARRY)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _bcs(enum address_mode mode, uint16_t address) {
+uint8_t _bcs(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (get_flag(CARRY)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _beq(enum address_mode mode, uint16_t address) {
+uint8_t _beq(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    // uint16_t initial_pc = nes.cpu.pc;
+
     if (get_flag(ZERO)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    // if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+    //     cycles += 2;
+    // }
+
+    return cycles;
 }
 
-void _bit(enum address_mode mode, uint16_t address) {
+uint8_t _bit(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
     uint8_t result = nes.cpu.a & data;
 
@@ -393,189 +449,302 @@ void _bit(enum address_mode mode, uint16_t address) {
 
     set_flag(OVERFLOW, data & 0x40);
     set_flag(NEGATIVE, data & 0x80);
+
+    return 0;
 }
 
-void _bmi(enum address_mode mode, uint16_t address) {
+uint8_t _bmi(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (get_flag(NEGATIVE)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _bne(enum address_mode mode, uint16_t address) {
+uint8_t _bne(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (!get_flag(ZERO)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _bpl(enum address_mode mode, uint16_t address) {
+uint8_t _bpl(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (!get_flag(NEGATIVE)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _brk(enum address_mode mode, uint16_t address) {
+uint8_t _brk(enum address_mode mode, uint16_t address) {
     stack_push_16(nes.cpu.pc);
     stack_push_8(nes.cpu.p);
     nes.cpu.pc = cpu_read_16(IRQ_VECTOR);
     set_flag(BREAK, true);
+
+    return 0;
 }
 
-void _bvc(enum address_mode mode, uint16_t address) {
+uint8_t _bvc(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (!get_flag(OVERFLOW)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _bvs(enum address_mode mode, uint16_t address) {
+uint8_t _bvs(enum address_mode mode, uint16_t address) {
+    uint8_t cycles = 0;
+    uint16_t initial_pc = nes.cpu.pc;
+
     if (get_flag(OVERFLOW)) {
         nes.cpu.pc += cpu_read_8(address) + 2;
+        cycles += 1;
     }
+
+    if (nes.cpu.pc >> 8 != initial_pc >> 8) {
+        cycles += 2;
+    }
+
+    return cycles;
 }
 
-void _clc(enum address_mode mode, uint16_t address) {
+uint8_t _clc(enum address_mode mode, uint16_t address) {
     set_flag(CARRY, false);
+
+    return 0;
 }
 
-void _cld(enum address_mode mode, uint16_t address) {
+uint8_t _cld(enum address_mode mode, uint16_t address) {
     set_flag(DECIMAL, false);
+
+    return 0;
 }
 
-void _cli(enum address_mode mode, uint16_t address) {
+uint8_t _cli(enum address_mode mode, uint16_t address) {
     set_flag(INTERRUPT, false);
+
+    return 0;
 }
 
-void _clv(enum address_mode mode, uint16_t address) {
+uint8_t _clv(enum address_mode mode, uint16_t address) {
     set_flag(OVERFLOW, false);
+
+    return 0;
 }
 
-void _cmp(enum address_mode mode, uint16_t address) {
+uint8_t _cmp(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
     uint8_t result = nes.cpu.a - data;
 
     set_flag(CARRY, nes.cpu.a >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
+
+    return 0;
 }
 
-void _cpx(enum address_mode mode, uint16_t address) {
+uint8_t _cpx(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
     uint8_t result = nes.cpu.x - data;
 
     set_flag(CARRY, nes.cpu.x >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
+
+    return 0;
 }
 
-void _cpy(enum address_mode mode, uint16_t address) {
+uint8_t _cpy(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
     uint8_t result = nes.cpu.y - data;
 
     set_flag(CARRY, nes.cpu.y >= data);
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
+
+    return 0;
 }
 
-void _dec(enum address_mode mode, uint16_t address) {
+uint8_t _dec(enum address_mode mode, uint16_t address) {
     uint8_t result = cpu_read_8(address) - 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     cpu_write_8(address, result);
+
+    if (mode == ABSOLUTE_X) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _dex(enum address_mode mode, uint16_t address) {
+uint8_t _dex(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.x - 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.x = result;
+
+    return 0;
 }
 
-void _dey(enum address_mode mode, uint16_t address) {
+uint8_t _dey(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.y - 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.y = result;
+
+    return 0;
 }
 
-void _eor(enum address_mode mode, uint16_t address) {
+uint8_t _eor(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.a ^ cpu_read_8(address);
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _inc(enum address_mode mode, uint16_t address) {
+uint8_t _inc(enum address_mode mode, uint16_t address) {
     uint8_t result = cpu_read_8(address) + 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     cpu_write_8(address, result);
+
+    if (mode == ABSOLUTE_X) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _inx(enum address_mode mode, uint16_t address) {
+uint8_t _inx(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.x + 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.x = result;
+
+    return 0;
 }
 
-void _iny(enum address_mode mode, uint16_t address) {
+uint8_t _iny(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.y + 1;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.y = result;
+
+    return 0;
 }
 
-void _jmp(enum address_mode mode, uint16_t address) {
+uint8_t _jmp(enum address_mode mode, uint16_t address) {
     // TODO: Indirect mode page boundary bug
     nes.cpu.pc = address;
+
+    return 0;
 }
 
-void _jsr(enum address_mode mode, uint16_t address) {
+uint8_t _jsr(enum address_mode mode, uint16_t address) {
     stack_push_16(nes.cpu.pc + instruction_length(mode) - 1);
     nes.cpu.pc = address;
+
+    return 0;
 }
 
-void _lda(enum address_mode mode, uint16_t address) {
+uint8_t _lda(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
 
     set_flag(ZERO, data == 0);
     set_flag(NEGATIVE, data & 0x80);
 
     nes.cpu.a = data;
+
+    if ((mode == ABSOLUTE_X || mode == ABSOLUTE_Y ||
+        mode == INDIRECT_INDEXED) && page_cross(mode)) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _ldx(enum address_mode mode, uint16_t address) {
+uint8_t _ldx(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
 
     set_flag(ZERO, data == 0);
     set_flag(NEGATIVE, data & 0x80);
 
     nes.cpu.x = data;
+
+    if (mode == ABSOLUTE_Y && page_cross(mode)) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _ldy(enum address_mode mode, uint16_t address) {
+uint8_t _ldy(enum address_mode mode, uint16_t address) {
     uint8_t data = cpu_read_8(address);
 
     set_flag(ZERO, data == 0);
     set_flag(NEGATIVE, data & 0x80);
 
     nes.cpu.y = data;
+
+    if (mode == ABSOLUTE_X && page_cross(mode)) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _lsr(enum address_mode mode, uint16_t address) {
+uint8_t _lsr(enum address_mode mode, uint16_t address) {
     uint8_t data;
     if (mode == ACCUMULATOR) {
         data = nes.cpu.a;
@@ -594,46 +763,64 @@ void _lsr(enum address_mode mode, uint16_t address) {
     } else {
         cpu_write_8(address, result);
     }
+
+    if (mode == ACCUMULATOR) {
+        return 0;
+    } else if (mode == ABSOLUTE_X) {
+        return 3;
+    } else {
+        return 2;
+    }
 }
 
-void _nop(enum address_mode mode, uint16_t address) {}
+uint8_t _nop(enum address_mode mode, uint16_t address) {return 0;}
 
-void _ora(enum address_mode mode, uint16_t address) {
+uint8_t _ora(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.a | cpu_read_8(address);
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _pha(enum address_mode mode, uint16_t address) {
+uint8_t _pha(enum address_mode mode, uint16_t address) {
     stack_push_8(nes.cpu.a);
+
+    return 0;
 }
 
-void _php(enum address_mode mode, uint16_t address) {
+uint8_t _php(enum address_mode mode, uint16_t address) {
     stack_push_8(nes.cpu.p | (1 << BREAK));
+
+    return 0;
 }
 
-void _pla(enum address_mode mode, uint16_t address) {
+uint8_t _pla(enum address_mode mode, uint16_t address) {
     uint8_t result = stack_pop_8();
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _plp(enum address_mode mode, uint16_t address) {
+uint8_t _plp(enum address_mode mode, uint16_t address) {
     uint8_t initial_flags = nes.cpu.p;
     uint8_t result = stack_pop_8();
 
     nes.cpu.p = result;
     set_flag(ONE, true);
     set_flag(BREAK, initial_flags & (1 << BREAK));
+
+    return 0;
 }
 
-void _rol(enum address_mode mode, uint16_t address) {
+uint8_t _rol(enum address_mode mode, uint16_t address) {
     uint8_t data;
     if (mode == ACCUMULATOR) {
         data = nes.cpu.a;
@@ -652,9 +839,17 @@ void _rol(enum address_mode mode, uint16_t address) {
     } else {
         cpu_write_8(address, result);
     }
+
+    if (mode == ACCUMULATOR) {
+        return 0;
+    } else if (mode == ABSOLUTE_X) {
+        return 3;
+    } else {
+        return 2;
+    }
 }
 
-void _ror(enum address_mode mode, uint16_t address) {
+uint8_t _ror(enum address_mode mode, uint16_t address) {
     uint8_t data;
     if (mode == ACCUMULATOR) {
         data = nes.cpu.a;
@@ -673,19 +868,31 @@ void _ror(enum address_mode mode, uint16_t address) {
     } else {
         cpu_write_8(address, result);
     }
+
+    if (mode == ACCUMULATOR) {
+        return 0;
+    } else if (mode == ABSOLUTE_X) {
+        return 3;
+    } else {
+        return 2;
+    }
 }
 
-void _rti(enum address_mode mode, uint16_t address) {
+uint8_t _rti(enum address_mode mode, uint16_t address) {
     nes.cpu.p = stack_pop_8();
     set_flag(ONE, true);
     nes.cpu.pc = stack_pop_16();
+
+    return 0;
 }
 
-void _rts(enum address_mode mode, uint16_t address) {
+uint8_t _rts(enum address_mode mode, uint16_t address) {
     nes.cpu.pc = stack_pop_16() + 1;
+
+    return 0;
 }
 
-void _sbc(enum address_mode mode, uint16_t address) {
+uint8_t _sbc(enum address_mode mode, uint16_t address) {
     uint8_t data = ~cpu_read_8(address);
 
     int result = nes.cpu.a + data + get_flag(CARRY);
@@ -696,79 +903,109 @@ void _sbc(enum address_mode mode, uint16_t address) {
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _sec(enum address_mode mode, uint16_t address) {
+uint8_t _sec(enum address_mode mode, uint16_t address) {
     set_flag(CARRY, 1);
+
+    return 0;
 }
 
-void _sed(enum address_mode mode, uint16_t address) {
+uint8_t _sed(enum address_mode mode, uint16_t address) {
     set_flag(DECIMAL, 1);
+
+    return 0;
 }
 
-void _sei(enum address_mode mode, uint16_t address) {
+uint8_t _sei(enum address_mode mode, uint16_t address) {
     set_flag(INTERRUPT, 1);
+
+    return 0;
 }
 
-void _sta(enum address_mode mode, uint16_t address) {
+uint8_t _sta(enum address_mode mode, uint16_t address) {
     cpu_write_8(address, nes.cpu.a);
+
+    if (mode == ABSOLUTE_X || mode == ABSOLUTE_Y || mode == INDIRECT_INDEXED) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
-void _stx(enum address_mode mode, uint16_t address) {
+uint8_t _stx(enum address_mode mode, uint16_t address) {
     cpu_write_8(address, nes.cpu.x);
+
+    return 0;
 }
 
-void _sty(enum address_mode mode, uint16_t address) {
+uint8_t _sty(enum address_mode mode, uint16_t address) {
     cpu_write_8(address, nes.cpu.y);
+
+    return 0;
 }
 
-void _tax(enum address_mode mode, uint16_t address) {
+uint8_t _tax(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.a;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.x = result;
+
+    return 0;
 }
 
-void _tay(enum address_mode mode, uint16_t address) {
+uint8_t _tay(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.a;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.y = result;
+
+    return 0;
 }
 
-void _tsx(enum address_mode mode, uint16_t address) {
+uint8_t _tsx(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.s;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.x = result;
+
+    return 0;
 }
 
-void _txa(enum address_mode mode, uint16_t address) {
+uint8_t _txa(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.x;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
-void _txs(enum address_mode mode, uint16_t address) {
+uint8_t _txs(enum address_mode mode, uint16_t address) {
     nes.cpu.s = nes.cpu.x;
+
+    return 0;
 }
 
-void _tya(enum address_mode mode, uint16_t address) {
+uint8_t _tya(enum address_mode mode, uint16_t address) {
     uint8_t result = nes.cpu.y;
 
     set_flag(ZERO, result == 0);
     set_flag(NEGATIVE, result & 0x80);
 
     nes.cpu.a = result;
+
+    return 0;
 }
 
 
@@ -780,69 +1017,71 @@ int execute_next() {
     enum instruction_name name = INSTRUCTION_LOOKUP[opcode];
     enum address_mode mode = ADDRESS_MODE_LOOKUP[opcode];
 
+    uint8_t cycles = INSTRUCTION_CYCLES[name] + ADDRESS_MODE_CYCLES[mode];
+
     uint16_t address = read_operand(mode);
 
     if (DEBUG) {
-        print_next_execution();
+        print_next_instruction();
     }
 
     switch (name) {
-        case ADC: _adc(mode, address); break;
-        case AND: _and(mode, address); break;
-        case ASL: _asl(mode, address); break;
-        case BCC: _bcc(mode, address); break;
-        case BCS: _bcs(mode, address); break;
-        case BEQ: _beq(mode, address); break;
-        case BIT: _bit(mode, address); break;
-        case BMI: _bmi(mode, address); break;
-        case BNE: _bne(mode, address); break;
-        case BPL: _bpl(mode, address); break;
-        case BRK: _brk(mode, address); break;
-        case BVC: _bvc(mode, address); break;
-        case BVS: _bvs(mode, address); break;
-        case CLC: _clc(mode, address); break;
-        case CLD: _cld(mode, address); break;
-        case CLI: _cli(mode, address); break;
-        case CLV: _clv(mode, address); break;
-        case CMP: _cmp(mode, address); break;
-        case CPX: _cpx(mode, address); break;
-        case CPY: _cpy(mode, address); break;
-        case DEC: _dec(mode, address); break;
-        case DEX: _dex(mode, address); break;
-        case DEY: _dey(mode, address); break;
-        case EOR: _eor(mode, address); break;
-        case INC: _inc(mode, address); break;
-        case INX: _inx(mode, address); break;
-        case INY: _iny(mode, address); break;
-        case JMP: _jmp(mode, address); break;
-        case JSR: _jsr(mode, address); break;
-        case LDA: _lda(mode, address); break;
-        case LDX: _ldx(mode, address); break;
-        case LDY: _ldy(mode, address); break;
-        case LSR: _lsr(mode, address); break;
-        case NOP: _nop(mode, address); break;
-        case ORA: _ora(mode, address); break;
-        case PHA: _pha(mode, address); break;
-        case PHP: _php(mode, address); break;
-        case PLA: _pla(mode, address); break;
-        case PLP: _plp(mode, address); break;
-        case ROL: _rol(mode, address); break;
-        case ROR: _ror(mode, address); break;
-        case RTI: _rti(mode, address); break;
-        case RTS: _rts(mode, address); break;
-        case SBC: _sbc(mode, address); break;
-        case SEC: _sec(mode, address); break;
-        case SED: _sed(mode, address); break;
-        case SEI: _sei(mode, address); break;
-        case STA: _sta(mode, address); break;
-        case STX: _stx(mode, address); break;
-        case STY: _sty(mode, address); break;
-        case TAX: _tax(mode, address); break;
-        case TAY: _tay(mode, address); break;
-        case TSX: _tsx(mode, address); break;
-        case TXA: _txa(mode, address); break;
-        case TXS: _txs(mode, address); break;
-        case TYA: _tya(mode, address); break;
+        case ADC: cycles += _adc(mode, address); break;
+        case AND: cycles += _and(mode, address); break;
+        case ASL: cycles += _asl(mode, address); break;
+        case BCC: cycles += _bcc(mode, address); break;
+        case BCS: cycles += _bcs(mode, address); break;
+        case BEQ: cycles += _beq(mode, address); break;
+        case BIT: cycles += _bit(mode, address); break;
+        case BMI: cycles += _bmi(mode, address); break;
+        case BNE: cycles += _bne(mode, address); break;
+        case BPL: cycles += _bpl(mode, address); break;
+        case BRK: cycles += _brk(mode, address); break;
+        case BVC: cycles += _bvc(mode, address); break;
+        case BVS: cycles += _bvs(mode, address); break;
+        case CLC: cycles += _clc(mode, address); break;
+        case CLD: cycles += _cld(mode, address); break;
+        case CLI: cycles += _cli(mode, address); break;
+        case CLV: cycles += _clv(mode, address); break;
+        case CMP: cycles += _cmp(mode, address); break;
+        case CPX: cycles += _cpx(mode, address); break;
+        case CPY: cycles += _cpy(mode, address); break;
+        case DEC: cycles += _dec(mode, address); break;
+        case DEX: cycles += _dex(mode, address); break;
+        case DEY: cycles += _dey(mode, address); break;
+        case EOR: cycles += _eor(mode, address); break;
+        case INC: cycles += _inc(mode, address); break;
+        case INX: cycles += _inx(mode, address); break;
+        case INY: cycles += _iny(mode, address); break;
+        case JMP: cycles += _jmp(mode, address); break;
+        case JSR: cycles += _jsr(mode, address); break;
+        case LDA: cycles += _lda(mode, address); break;
+        case LDX: cycles += _ldx(mode, address); break;
+        case LDY: cycles += _ldy(mode, address); break;
+        case LSR: cycles += _lsr(mode, address); break;
+        case NOP: cycles += _nop(mode, address); break;
+        case ORA: cycles += _ora(mode, address); break;
+        case PHA: cycles += _pha(mode, address); break;
+        case PHP: cycles += _php(mode, address); break;
+        case PLA: cycles += _pla(mode, address); break;
+        case PLP: cycles += _plp(mode, address); break;
+        case ROL: cycles += _rol(mode, address); break;
+        case ROR: cycles += _ror(mode, address); break;
+        case RTI: cycles += _rti(mode, address); break;
+        case RTS: cycles += _rts(mode, address); break;
+        case SBC: cycles += _sbc(mode, address); break;
+        case SEC: cycles += _sec(mode, address); break;
+        case SED: cycles += _sed(mode, address); break;
+        case SEI: cycles += _sei(mode, address); break;
+        case STA: cycles += _sta(mode, address); break;
+        case STX: cycles += _stx(mode, address); break;
+        case STY: cycles += _sty(mode, address); break;
+        case TAX: cycles += _tax(mode, address); break;
+        case TAY: cycles += _tay(mode, address); break;
+        case TSX: cycles += _tsx(mode, address); break;
+        case TXA: cycles += _txa(mode, address); break;
+        case TXS: cycles += _txs(mode, address); break;
+        case TYA: cycles += _tya(mode, address); break;
         default:
             eprintf("ERROR: Unknown instruction with opcode: 0x%02X\nHalting execution\n", opcode);
             break;
@@ -853,24 +1092,25 @@ int execute_next() {
         nes.cpu.pc += instruction_length(mode);
     }
 
-    return 0;
+    return cycles;
 }
 
 void poweron() {
     nes.cpu.pc = cpu_read_16(RESET_VECTOR);
     if (DEBUG) nes.cpu.pc = 0xc000; // nestest.nes
+    state.cycles = 7;
     nes.cpu.s = 0xfd;
     set_flag(INTERRUPT, true);
     set_flag(ONE, true);
 }
 
 void run() {
-    int cycles = 0;
-    for (int i = 0; 1; i++) {
-        if (cycles == 0) {
-            cycles += execute_next();
+    for (;;) {
+        if (state.cycles_queue == 0) {
+            state.cycles_queue = execute_next();
         } else {
-            cycles--;
+            state.cycles_queue--;
+            state.cycles++;
         }
     }
 }
