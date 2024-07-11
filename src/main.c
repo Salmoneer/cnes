@@ -65,6 +65,10 @@ void cleanup() {
 
 #define eprintf(format, ...) fprintf(stderr, format, ##__VA_ARGS__)
 
+#define log_info(format, ...) fprintf(stderr, "INFO [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_warning(format, ...) fprintf(stderr, "WARNING [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_error(format, ...) fprintf(stdout, "ERROR [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+
 
 uint8_t *read_file(const char *filename) {
     FILE *f = fopen(filename, "rb");
@@ -127,7 +131,7 @@ uint8_t cpu_read_8(uint16_t address) {
         return cartridge.prg_rom[(address - 0x8000) & (cartridge.header.prg_size == 1 ? 0x3fff : 0xffff)];
     }
 
-    eprintf("WARNING: Read from unmapped address: %04x\n", address);
+    log_warning("Read from unmapped address: %04x\n", address);
     return 0;
 }
 
@@ -141,7 +145,7 @@ void cpu_write_8(uint16_t address, uint8_t data) {
     } else if (address >= 0x8000) {
         cartridge.prg_rom[address - 0x8000] = data;
     } else {
-        eprintf("WARNING: Write to unmapped address: %04x with data: %02X\n", address, data);
+        log_warning("Write to unmapped address: %04x with data: %02X\n", address, data);
     }
 }
 
@@ -203,7 +207,7 @@ uint16_t instruction_length(enum address_mode mode) {
         case ABSOLUTE_Y:
             return 3;
         default:
-            eprintf("ERROR: Unable to find length of instruction with unknown addressing mode with id: %d\nHalting execution\n", mode);
+            log_error("Unable to find length of instruction with unknown addressing mode with id: %d\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
 }
@@ -238,7 +242,7 @@ uint16_t read_operand(enum address_mode mode) {
         case INDIRECT_INDEXED:
             return cpu_read_8(operand_8) + 256 * cpu_read_8((operand_8 + 1) % 256) + nes.cpu.y;
         default:
-            eprintf("ERROR: Unknown addressing mode with id: %d\nHalting execution\n", mode);
+            log_error("Unknown addressing mode with id: %d\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
 }
@@ -1082,7 +1086,7 @@ int execute_next() {
         case TXS: cycles += _txs(mode, address); break;
         case TYA: cycles += _tya(mode, address); break;
         default:
-            eprintf("ERROR: Unknown instruction with opcode: 0x%02X\nHalting execution\n", opcode);
+            log_error("Unknown instruction with opcode: 0x%02X\nHalting execution\n", opcode);
             break;
     }
 
@@ -1096,7 +1100,6 @@ int execute_next() {
 
 void poweron() {
     nes.cpu.pc = cpu_read_16(RESET_VECTOR);
-    if (state.debug) nes.cpu.pc = 0xc000; // nestest.nes
     state.cycles = 7;
     nes.cpu.s = 0xfd;
     set_flag(INTERRUPT, true);
