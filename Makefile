@@ -1,7 +1,7 @@
 CC = gcc
 LD = gcc
 
-CFLAGS = -O0 -g -Wall -Werror -Wpedantic
+CFLAGS = -std=c99 -O0 -g -Wall -Werror -Wpedantic
 LDFLAGS = -lSDL2
 
 BUILD = build
