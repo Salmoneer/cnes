@@ -4,12 +4,18 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <SDL2/SDL.h>
 #include "instructions.h"
 
 
 const uint16_t NMI_VECTOR = 0xfffa;
 const uint16_t RESET_VECTOR = 0xfffc;
 const uint16_t IRQ_VECTOR = 0xfffe;
+
+const uint32_t SCREEN_WIDTH = 256;
+const uint32_t SCREEN_HEIGHT = 240;
+
+const uint32_t WINDOW_SCALE = 3;
 
 enum flag {
     CARRY     = 0,
@@ -43,31 +49,45 @@ struct {
     struct {
         uint16_t pc;
         uint8_t a, x, y, s, p;
+        uint8_t *ram;
     } cpu;
 
-    uint8_t *ram;
+    struct {
+        bool nmi_occured;
+        bool nmi_enabled;
+    } ppu;
 } nes = { 0 };
 
 
 struct {
     bool debug;
 
-    uint8_t *data;
+    uint8_t *filedata;
+
+    uint8_t *ram;
 
     uint64_t cycles;
     uint64_t cycles_queue;
+
+    SDL_Window *window;
+    SDL_Renderer *renderer;
+    SDL_Texture *texture;
 } state = { 0 };
 
 void cleanup() {
-    if (state.data != NULL) free(state.data);
+    if (state.filedata != NULL) free(state.filedata);
+    if (state.ram != NULL) free(state.ram);
+
+    if (state.texture != NULL) SDL_DestroyTexture(state.texture);
+    if (state.renderer != NULL) SDL_DestroyRenderer(state.renderer);
+    if (state.window != NULL) SDL_DestroyWindow(state.window);
+    SDL_Quit();
 }
 
 
-#define eprintf(format, ...) fprintf(stderr, format, ##__VA_ARGS__)
-
-#define log_info(format, ...) fprintf(stderr, "INFO [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
-#define log_warning(format, ...) fprintf(stderr, "WARNING [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
-#define log_error(format, ...) fprintf(stdout, "ERROR [CYCLE %04lx PC %04x]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_info(format, ...) fprintf(stderr, "INFO [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_warning(format, ...) fprintf(stderr, "WARNING [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_error(format, ...) fprintf(stdout, "ERROR [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
 
 
 uint8_t *read_file(const char *filename) {
@@ -85,37 +105,35 @@ uint8_t *read_file(const char *filename) {
 }
 
 void load_cartridge() {
-    if ((state.data[7] & 0x0c) == 0x08) {
+    if ((state.filedata[7] & 0x0c) == 0x08) {
         printf("iNES 2.0 is not supported.\n");
         exit(EXIT_FAILURE);
     }
 
-    memcpy(cartridge.header.nes, state.data, 4);
-    cartridge.header.prg_size = state.data[4];
-    cartridge.header.chr_size = state.data[5];
-    cartridge.header.flags_6 = state.data[6];
-    cartridge.header.flags_7 = state.data[7];
-    memcpy(cartridge.header.padding, state.data + 8, 8);
+    memcpy(cartridge.header.nes, state.filedata, 4);
+    cartridge.header.prg_size = state.filedata[4];
+    cartridge.header.chr_size = state.filedata[5];
+    cartridge.header.flags_6 = state.filedata[6];
+    cartridge.header.flags_7 = state.filedata[7];
+    memcpy(cartridge.header.padding, state.filedata + 8, 8);
 
     bool trainer = cartridge.header.flags_6 & (1 << 3);
 
-    cartridge.prg_rom = state.data + 16 + (trainer ? 512 : 0);
+    cartridge.prg_rom = state.filedata + 16 + (trainer ? 512 : 0);
     cartridge.chr_rom = cartridge.prg_rom + cartridge.header.prg_size;
 
     cartridge.mapper = (cartridge.header.flags_7 & 0xf0) | (cartridge.header.flags_6 >> 4);
 }
 
 void print_header() {
-    if (state.debug) return;
-
     printf("Magic: ");
     for (int i = 0; i < 3; i++) {
         printf("%c", cartridge.header.nes[i]);
     }
     printf(" 0x%02X\n", cartridge.header.nes[3]);
 
-    printf("PRG ROM size: %d * 16KiB\n", cartridge.header.prg_size);
-    printf("CHR ROM size: %d *  8KiB\n", cartridge.header.chr_size);
+    printf("PRG ROM size: %u * 16KiB\n", cartridge.header.prg_size);
+    printf("CHR ROM size: %u *  8KiB\n", cartridge.header.chr_size);
 
     printf("Flags (6): 0x%02X\n", cartridge.header.flags_6);
     printf("Flags (7): 0x%02X\n", cartridge.header.flags_7);
@@ -124,14 +142,43 @@ void print_header() {
 }
 
 
+void present() {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) {
+            printf("Window closed, ending\n");
+            exit(EXIT_SUCCESS);
+        }
+    }
+
+    SDL_SetRenderTarget(state.renderer, NULL);
+    SDL_RenderCopy(state.renderer, state.texture, NULL, NULL);
+    SDL_RenderPresent(state.renderer);
+}
+
+
+uint8_t cpu_read_8(uint16_t address);
+uint16_t cpu_read_16(uint16_t address);
+void stack_push_8(uint8_t data);
+void stack_push_16(uint16_t data);
+uint16_t instruction_length(enum address_mode mode);
+
+
+void perform_nmi() {
+    stack_push_8(nes.cpu.p);
+    stack_push_16(nes.cpu.pc + instruction_length(ADDRESS_MODE_LOOKUP[cpu_read_8(nes.cpu.pc)]));
+    nes.cpu.pc = cpu_read_16(NMI_VECTOR);
+}
+
+
 uint8_t cpu_read_8(uint16_t address) {
     if (address < 0x2000) {
-        return nes.ram[address & 0x07ff];
+        return nes.cpu.ram[address & 0x07ff];
     } else if (address >= 0x8000) {
         return cartridge.prg_rom[(address - 0x8000) & (cartridge.header.prg_size == 1 ? 0x3fff : 0xffff)];
     }
 
-    log_warning("Read from unmapped address: %04x\n", address);
+    log_warning("Read from unmapped address: 0x%04X\n", address);
     return 0;
 }
 
@@ -141,11 +188,11 @@ uint16_t cpu_read_16(uint16_t address) {
 
 void cpu_write_8(uint16_t address, uint8_t data) {
     if (address < 0x2000) {
-        nes.ram[address & 0x07ff] = data;
+        nes.cpu.ram[address & 0x07ff] = data;
     } else if (address >= 0x8000) {
         cartridge.prg_rom[address - 0x8000] = data;
     } else {
-        log_warning("Write to unmapped address: %04x with data: %02X\n", address, data);
+        log_warning("Write to unmapped address: $%04X with data: #$%02X\n", address, data);
     }
 }
 
@@ -171,7 +218,7 @@ uint8_t get_flag(enum flag f) {
 }
 
 void stack_push_8(uint8_t data) {
-    nes.ram[0x0100 + nes.cpu.s--] = data;
+    nes.cpu.ram[0x0100 + nes.cpu.s--] = data;
 }
 
 void stack_push_16(uint16_t data) {
@@ -180,7 +227,7 @@ void stack_push_16(uint16_t data) {
 }
 
 uint8_t stack_pop_8() {
-    return nes.ram[0x0100 + ++nes.cpu.s];
+    return nes.cpu.ram[0x0100 + ++nes.cpu.s];
 }
 
 uint16_t stack_pop_16() {
@@ -207,7 +254,7 @@ uint16_t instruction_length(enum address_mode mode) {
         case ABSOLUTE_Y:
             return 3;
         default:
-            log_error("Unable to find length of instruction with unknown addressing mode with id: %d\nHalting execution\n", mode);
+            log_error("Unable to find length of instruction with unknown addressing mode with id: %u\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
 }
@@ -242,7 +289,7 @@ uint16_t read_operand(enum address_mode mode) {
         case INDIRECT_INDEXED:
             return cpu_read_8(operand_8) + 256 * cpu_read_8((operand_8 + 1) % 256) + nes.cpu.y;
         default:
-            log_error("Unknown addressing mode with id: %d\nHalting execution\n", mode);
+            log_error("Unknown addressing mode with id: %u\nHalting execution\n", mode);
             exit(EXIT_FAILURE);
     }
 }
@@ -1086,7 +1133,7 @@ int execute_next() {
         case TXS: cycles += _txs(mode, address); break;
         case TYA: cycles += _tya(mode, address); break;
         default:
-            log_error("Unknown instruction with opcode: 0x%02X\nHalting execution\n", opcode);
+            log_error("Unknown instruction with opcode: #$%02X\nHalting execution\n", opcode);
             break;
     }
 
@@ -1096,6 +1143,39 @@ int execute_next() {
     }
 
     return cycles;
+}
+
+void init(char *filename) {
+    state.filedata = read_file(filename);
+
+    if (state.filedata == NULL) {
+        printf("Please provide a valid file\n");
+        exit(EXIT_FAILURE);
+    }
+
+    load_cartridge();
+
+    if (!state.debug) {
+        print_header();
+    }
+
+    state.ram = malloc(2048);
+    assert(state.ram != NULL);
+    nes.cpu.ram = state.ram;
+
+    int code = SDL_Init(SDL_INIT_VIDEO);
+    if (code < 0) {
+        log_error("Failed to initialise SDL with code: %d\n", code);
+        exit(EXIT_FAILURE);
+    };
+
+    state.window = SDL_CreateWindow("NES Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_SCALE * SCREEN_WIDTH, WINDOW_SCALE * SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    state.renderer = SDL_CreateRenderer(state.window, -1, 0);
+    state.texture = SDL_CreateTexture(state.renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_TARGET, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+    assert(state.window != NULL);
+    assert(state.renderer != NULL);
+    assert(state.texture != NULL);
 }
 
 void poweron() {
@@ -1114,6 +1194,7 @@ void run() {
             state.cycles_queue--;
             state.cycles++;
         }
+        present();
     }
 }
 
@@ -1129,24 +1210,7 @@ int main(int argc, char **argv) {
         state.debug = true;
     }
 
-    state.data = read_file(argv[1]);
-
-    if (state.data == NULL) {
-        printf("Please provide a valid file\n");
-        exit(EXIT_FAILURE);
-    }
-
-    load_cartridge();
-    print_header();
-
-    if (argc > 2 && strcmp(argv[2], "--read-header") == 0) {
-        exit(EXIT_SUCCESS);
-    }
-
-    uint8_t ram[2048] = { 0 };
-
-    nes.ram = ram;
-
+    init(argv[1]);
     poweron();
     run();
 }
