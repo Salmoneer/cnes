@@ -12,7 +12,11 @@ OBJS = $(SRCS:src/%.c=$(BUILD)/%.o)
 DEPS = $(OBJS:.o=.d)
 
 
+default: $(TARGET)
+
+
 .PHONY: clean run
+.SILENT:
 
 
 $(TARGET): $(OBJS)
