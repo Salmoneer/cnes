@@ -75,19 +75,42 @@ struct {
 } state = { 0 };
 
 void cleanup() {
-    if (state.filedata != NULL) free(state.filedata);
-    if (state.ram != NULL) free(state.ram);
+    if (state.filedata != NULL) {
+        free(state.filedata);
+        state.filedata = NULL;
+    }
 
-    if (state.texture != NULL) SDL_DestroyTexture(state.texture);
-    if (state.renderer != NULL) SDL_DestroyRenderer(state.renderer);
-    if (state.window != NULL) SDL_DestroyWindow(state.window);
+    if (state.ram != NULL) {
+        free(state.ram);
+        state.ram = NULL;
+    }
+
+    if (state.texture != NULL) {
+        SDL_DestroyTexture(state.texture);
+        state.texture = NULL;
+    }
+
+    if (state.renderer != NULL) {
+        SDL_DestroyRenderer(state.renderer);
+        state.renderer = NULL;
+    }
+
+    if (state.window != NULL) {
+        SDL_DestroyWindow(state.window);
+        state.window = NULL;
+    }
+
     SDL_Quit();
 }
 
 
-#define log_info(format, ...) fprintf(stderr, "INFO [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
-#define log_warning(format, ...) fprintf(stderr, "WARNING [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
-#define log_error(format, ...) fprintf(stdout, "ERROR [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define log_info(format) fprintf(stderr, "INFO [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc)
+#define log_warning(format) fprintf(stderr, "WARNING [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc)
+#define log_error(format) fprintf(stdout, "ERROR [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc)
+
+#define logf_info(format, ...) fprintf(stderr, "INFO [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define logf_warning(format, ...) fprintf(stderr, "WARNING [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
+#define logf_error(format, ...) fprintf(stdout, "ERROR [CYCLE %04lX PC %04X]: " format, state.cycles, nes.cpu.pc, ##__VA_ARGS__)
 
 
 uint8_t *read_file(const char *filename) {
@@ -107,6 +130,11 @@ uint8_t *read_file(const char *filename) {
 void load_cartridge() {
     if ((state.filedata[7] & 0x0c) == 0x08) {
         printf("iNES 2.0 is not supported.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (strncmp((char *)state.filedata, "NES\x1A", 4) != 0) {
+        logf_error("Invalid file magic: 0x%02X 0x%02X 0x%02X 0x%02X\n", state.filedata[0], state.filedata[1], state.filedata[2], state.filedata[3]);
         exit(EXIT_FAILURE);
     }
 
@@ -146,7 +174,8 @@ void present() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) {
-            printf("Window closed, ending\n");
+            log_info("Window closed\n");
+            log_info("Exiting\n");
             exit(EXIT_SUCCESS);
         }
     }
@@ -178,7 +207,7 @@ uint8_t cpu_read_8(uint16_t address) {
         return cartridge.prg_rom[(address - 0x8000) & (cartridge.header.prg_size == 1 ? 0x3fff : 0xffff)];
     }
 
-    log_warning("Read from unmapped address: 0x%04X\n", address);
+    logf_warning("Read from unmapped address: 0x%04X\n", address);
     return 0;
 }
 
@@ -192,7 +221,7 @@ void cpu_write_8(uint16_t address, uint8_t data) {
     } else if (address >= 0x8000) {
         cartridge.prg_rom[address - 0x8000] = data;
     } else {
-        log_warning("Write to unmapped address: $%04X with data: #$%02X\n", address, data);
+        logf_warning("Write to unmapped address: $%04X with data: #$%02X\n", address, data);
     }
 }
 
@@ -254,7 +283,8 @@ uint16_t instruction_length(enum address_mode mode) {
         case ABSOLUTE_Y:
             return 3;
         default:
-            log_error("Unable to find length of instruction with unknown addressing mode with id: %u\nHalting execution\n", mode);
+            logf_error("Unable to find length of instruction with unknown addressing mode with id: %u\n", mode);
+            log_error("Halting execution\n");
             exit(EXIT_FAILURE);
     }
 }
@@ -289,7 +319,8 @@ uint16_t read_operand(enum address_mode mode) {
         case INDIRECT_INDEXED:
             return cpu_read_8(operand_8) + 256 * cpu_read_8((operand_8 + 1) % 256) + nes.cpu.y;
         default:
-            log_error("Unknown addressing mode with id: %u\nHalting execution\n", mode);
+            logf_error("Unknown addressing mode with id: %u\n", mode);
+            log_error("Halting execution\n");
             exit(EXIT_FAILURE);
     }
 }
@@ -1133,7 +1164,8 @@ int execute_next() {
         case TXS: cycles += _txs(mode, address); break;
         case TYA: cycles += _tya(mode, address); break;
         default:
-            log_error("Unknown instruction with opcode: #$%02X\nHalting execution\n", opcode);
+            logf_error("Unknown instruction with opcode: #$%02X\n", opcode);
+            log_error("Halting execution\n");
             break;
     }
 
@@ -1165,7 +1197,7 @@ void init(char *filename) {
 
     int code = SDL_Init(SDL_INIT_VIDEO);
     if (code < 0) {
-        log_error("Failed to initialise SDL with code: %d\n", code);
+        logf_error("Failed to initialise SDL with code: %d\n", code);
         exit(EXIT_FAILURE);
     };
 
