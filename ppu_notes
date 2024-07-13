@@ -1,0 +1,87 @@
+https://www.reddit.com/r/EmuDev/comments/evu3u2/what_does_the_nes_ppu_actually_do/
+
+Heya, basically in the same position as you, a few days later. :)
+Basically, the process I've found that has gotten me...progress has been:
+0. Load Donkey Kong :)
+    Make sure you have NMI implemented on CPU (pretty straightforward)
+    Implement PPUSTATUS vblank flag (simple) and PPUCTRL NMI flag + background address flag (simple)
+    Implement PPUADDR/PPUDATA so that the nametables are filled out
+    Now you have some data your PPU can actually read for rendering background. Render it scanline by scanline - just follow the wiki on this. Maybe the timing will be bad, it doesn't matter for this game. Start off with rendering tiles based on the pattern table ID, don't try and fetch patterns.
+    Fix the inevitable bugs with your PPUDATA implementation until you see a blocky version of the Donkey Kong screen.
+    Now fetch pattern table data using the nametable data. If it looks "wrong" make sure you are consuming the background address flag. Start off with black and white, then pick two colors to mix for the two bits. Now you should have something like
+    https://i.imgur.com/7OIpHgd.png
+    (Optional) implement palette reads (I'm skipping this for now).
+    Implement OAMDMA (and OAMDATA I guess, I implemented one on top of the other)
+    Now you should have sprite data to render. Implement the logic for copying from primary OAM to scanline OAM. I'm doing it all as one step (not smearing it over up to 256 cycles like the actual hardware). Skip the confusing sprite overflow junk.
+    This is where I'm stuck. I think I need to read the "sprites" section of https://wiki.nesdev.com/w/index.php/PPU_rendering very carefully.
+Edit: Make sure you render the bg dot by dot and not tile by tile or the sprite render code will go badly. :(
+
+
+
+
+
+From $2002: the low five bits are just whatever was last written into the PPU, not actually status in a meaningful sense.
+Bit 5 is related to 'sprite overflow'; it was intended to allow a programmer to tell whether at some point in the display they tried to put more sprites on a single line than the PPU can display. It's buggy though so it doesn't communicate that perfectly. See this — especially "If the value is not in range, increment n and m (without carry)".
+Super Mario Bros doesn't really care about the value of bit 5, so for now you don't need really to care about it.
+Bit 6 is a sprite 0 collision flag. Super Mario Bros does care about this flag when starting up. It will be set if and when a pixel from sprite 0 overlaps a non-zero pixel from the background. It is reset automatically shortly before each frame begins. So software can use this to decide whether a player character has hit the background, but quite often it's just used as a way to know exactly when the output gets to a certain point — software will ensure that sprite 0 is overlapping the background at a certain point on the display and by watching the flag it will know exactly when the PPU has reached that point on the display.
+Bit 7 just indicates whether the display is currently in vertical blank. That's useful to know because it helps the CPU judge when it can push new display data.
+So, in net:
+    the PPU is free running. It will, without CPU intervention, output the display from top left to bottom right. During that period it will consult with the sprite tables and other pushed state to decide what to draw;
+    if at any time while it is drawing it spots [what it thinks is] sprite overflow, or sprite 0 collision, it will set the relevant flags then;
+    the vertical blank flag just gives you a boiled down version of how far along painting the display it is — not detailed information like "I'm 25% of the way across line 68", just whether it is currently in the vertical pixel area or is not.
+As an aside, Super Mario Bros isn't usually advocated as the first thing to try to get running, as earlier titles like Donkey Kong use the PPU in a much simpler fashion. For Super Mario you're going to need to get at least as far as having sprite 0 collision working before you even get to the title screen, if memory serves, whereas Donkey Kong will get right the way into gameplay before you need sprites to be working at all.
+
+
+
+Resources:
+    https://wiki.nesdev.com/w/index.php/PPU_rendering
+    https://wiki.nesdev.com/w/index.php/PPU_scrolling
+There are a few parts of a frame:
+    Vblank Time (20 scanlines)
+    Prerender Line (1 scanline)
+    Render Time (240 scanlines)
+    Postrender Line (1 scanline)
+Each scanline is normally 341 dots long.
+How the PPU generates the background:
+PPU runs dot-by-dot. There are 341 dots in a scanline.
+The Prerender Line and 240 scanlines of render time do a bunch of memory fetches. They will fetch Nametable Byte (which tile to draw), Attribute Table Byte (what colors to use), then use those to calculate the address of the tile graphics to fetch.
+So there's a repeating 4 fetch sequence that the PPU does all the time.
+    Fetch Nametable Byte
+    Fetch Attribute Table Byte
+    Fetch character graphics byte 1
+    Fetch character graphics byte 2
+This sequence takes 8 dots worth of time to complete (2 dots per step), and generates 8 pixels of information to output later.
+Significant events:
+    Dot 321-336: First two tiles worth of data are fetched from video memory.
+    Dot 0-255: Next 32 tiles are fetched
+    Dot 256: Vertical counters for scrolling incremented
+    Dot 257: Horizontal counters for scrolling snap back to the beginning
+There's also this tiny buffer (16 pixels large) that holds fully computed color numbers to send out. It shifts a whole pixel out every dot. Fine horizontal scrolling picks which pixel gets displayed, hence how fine horizontal scrolling works.
+
+
+
+It'll determine the colour of each pixel based on whatever is currently in its registers plus whatever is currently in the various bits of memory it inspects: the pattern, name and attribute tables, the object attribute memory, and the palette. $2006 and $2007 are used to write into the PPU's memory, other registers will affect how it interprets that memory — e.g. to set scrolling, to tell it where you placed the object attributes, etc.
+When it is outputting pixels it outputs one per clock, but it actually spends quite a lot of time not outputting pixels, because the TV doesn't draw the entire signal. There are periods that are off-screen, most notably including retrace. It takes a TV a non-zero amount of time to move the beam back from the right to the left of the display, or from the bottom to the top.
+The vertical blank (/vblank) flag tells you about the vertical period in which nothing is being output, because the horizontal periods are very short. I think on the NES the flag is set after the first line with no pixels on it, so if the first pixel line is line 0 then it is set at the start of line 241. It is then left set until the start of the final line before line 0 (which sounds like a weird way of phrasing it, but remember that PAL and NTSC displays have a different total number of lines — with the PPU, 312 and 262 respectively).
+Aside: reading the PPU status is an alternative way to reset the status vblank flag. The PPU will reset it autonomously at the end of the blanking period if it is still set at that time, but if a programmer has read it then it'll be reset then. (And, really getting into the weeds: there's a race condition on that which can cause unexpected behaviour if the programmer reads very close to when it should be set, but you can worry about that later)
+Second aside: the PPU has its own memory and its own mechanism for writing it because that allows the PPU to have exclusive access to the memory the whole time. Which means it doesn't have to be so fast that it can handle both the PPU and the CPU trying to work on it simultaneously.
+
+
+
+
+
+I came across this when working on my NES emulator that had a decent overview of decoding the colors.
+https://austinmorlan.com/posts/nes_rendering_overview/
+
+The PPU has its own address space. The CPU can't read or write this memory except through the PPU registers. The PPU memory has CHR-ROM (Tile/Bitmap data), the Nametables (stores index to tile memory), Attribute tables (stores palette ID) and Palette colors.
+
+Nametable stores 32x30 index to tiles. Tiles are 8x8 bitmaps. The last two rows of the nametable is the attribute table.
+
+PPU memory map
+0x0000 - 0x1FFF  CHR ROM (Bitmap pattern data)
+0x2000 - 0x23FF  Nametable 1  Attribute @ 0x23C0
+0x2400 - 0x27FF  Nametable 2  Attribute @ 0x27C0
+0x2800 - 0x2BFF  Nametable 3  Attribute @ 0x2BC0
+0x2C00 - 0x2FFF  Nametable 4  Attribute @ 0x2FC0
+0x3000 - 0x3F00  Mirror of nametables
+0x3F00 - 0x3F1F  Palette colors
