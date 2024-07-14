@@ -132,7 +132,7 @@ uint8_t *read_file(const char *filename) {
 
 void load_cartridge() {
     if ((state.filedata[7] & 0x0c) == 0x08) {
-        printf("iNES 2.0 is not supported.\n");
+        log_error("iNES 2.0 is not supported.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -1184,7 +1184,7 @@ void init(char *filename) {
     state.filedata = read_file(filename);
 
     if (state.filedata == NULL) {
-        printf("Please provide a valid file\n");
+        log_error("Invalid file\n");
         exit(EXIT_FAILURE);
     }
 
@@ -1237,7 +1237,7 @@ int main(int argc, char **argv) {
     atexit(cleanup);
 
     if (argc < 2) {
-        printf("Please provide a file\n");
+        log_error("Please provide a file\n");
         exit(EXIT_FAILURE);
     }
 
