@@ -12,10 +12,13 @@ const uint16_t NMI_VECTOR = 0xfffa;
 const uint16_t RESET_VECTOR = 0xfffc;
 const uint16_t IRQ_VECTOR = 0xfffe;
 
+const uint32_t WINDOW_SCALE = 3;
+
 const uint32_t SCREEN_WIDTH = 256;
 const uint32_t SCREEN_HEIGHT = 240;
 
-const uint32_t WINDOW_SCALE = 3;
+const uint32_t SCANLINE_WIDTH = 341;
+const uint32_t SCANLINE_HEIGHT = 262;
 
 enum flag {
     CARRY     = 0,
