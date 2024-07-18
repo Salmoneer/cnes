@@ -482,7 +482,7 @@ uint8_t _bcc(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (!get_flag(CARRY)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -498,7 +498,7 @@ uint8_t _bcs(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (get_flag(CARRY)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -514,7 +514,7 @@ uint8_t _beq(enum address_mode mode, uint16_t address) {
     // uint16_t initial_pc = nes.cpu.pc;
 
     if (get_flag(ZERO)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -542,7 +542,7 @@ uint8_t _bmi(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (get_flag(NEGATIVE)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -558,7 +558,7 @@ uint8_t _bne(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (!get_flag(ZERO)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -574,7 +574,7 @@ uint8_t _bpl(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (!get_flag(NEGATIVE)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -599,7 +599,7 @@ uint8_t _bvc(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (!get_flag(OVERFLOW)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
@@ -615,7 +615,7 @@ uint8_t _bvs(enum address_mode mode, uint16_t address) {
     uint16_t initial_pc = nes.cpu.pc;
 
     if (get_flag(OVERFLOW)) {
-        nes.cpu.pc += cpu_read_8(address) + 2;
+        nes.cpu.pc += (int8_t)cpu_read_8(address) + 2;
         cycles += 1;
     }
 
